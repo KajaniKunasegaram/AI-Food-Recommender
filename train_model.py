@@ -7,9 +7,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
 
-# -------------------------------
 # Database Config
-# -------------------------------
 DB_USER = 'root'
 DB_PASS = ''
 DB_HOST = '127.0.0.1'
@@ -18,9 +16,7 @@ engine = create_engine(
     f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
 )
 
-# ================================================
-# PART 1: Load Kaggle CSV Dataset
-# ================================================
+# Load Kaggle CSV Dataset
 print("🔄 Loading Kaggle dataset...")
 try:
     kaggle_df = pd.read_csv('order_history.csv')
@@ -42,9 +38,7 @@ except FileNotFoundError:
     print("⚠️  order_history.csv not found — using database only")
     kaggle_df = pd.DataFrame(columns=['customer_id', 'item_id', 'subtotal', 'Rating', 'sub_cat_id', 'source'])
 
-# ================================================
-# PART 2: Load Database Data (with sub_cat_id JOIN)
-# ================================================
+# Load Database Data (with sub_cat_id JOIN)
 print("\n🔄 Connecting to Database...")
 db_query = """
     SELECT 
@@ -72,9 +66,7 @@ else:
     print(f"   Unique items     : {db_df['item_id'].nunique()}")
     print(f"   Unique sub_cats  : {db_df['sub_cat_id'].nunique()}")
 
-# ================================================
-# PART 3: Merge
-# ================================================
+# Merge
 print("\n🔄 Merging datasets...")
 df = pd.concat([kaggle_df, db_df], ignore_index=True)
 df = df.dropna(subset=['customer_id', 'item_id', 'subtotal'])
@@ -90,9 +82,7 @@ if df.empty:
     print("❌ No data available. Exiting.")
     exit()
 
-# ================================================
-# PART 4: Encoding
-# ================================================
+#  Encoding
 le_cust = LabelEncoder()
 df['cust_encoded'] = le_cust.fit_transform(df['customer_id'])
 
@@ -103,21 +93,15 @@ print(f"\n   DB customers in model:")
 for c in df[df['source'] == 'database']['customer_id'].unique():
     print(f"   ✅ {c[:20]}...")
 
-# ================================================
-# PART 5: Feature Selection
-# Now includes sub_cat_id for Content-Based filtering
-# ================================================
+# Feature Selection
+# Content-Based filtering
 X = df[['cust_encoded', 'food_encoded', 'sub_cat_id', 'Rating', 'subtotal']]
 
-# ================================================
-# PART 6: Scaling
-# ================================================
+# Scaling
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-# ================================================
-# PART 7: Train-Test Split & KNN
-# ================================================
+# Train-Test Split & KNN
 if len(df) >= 10:
     X_train, X_test = train_test_split(X_scaled, test_size=0.2, random_state=42)
     print(f"\n   Train size: {len(X_train)} | Test size: {len(X_test)}")
@@ -130,9 +114,7 @@ n_neighbors = min(5, len(X_train))
 model = NearestNeighbors(n_neighbors=n_neighbors, metric='euclidean', algorithm='auto')
 model.fit(X_train)
 
-# ================================================
-# PART 8: Accuracy
-# ================================================
+#  Accuracy
 print("\n--- 📊 Model Evaluation ---")
 train_dist, _ = model.kneighbors(X_train)
 train_accuracy = (1 / (1 + np.mean(train_dist))) * 100
@@ -143,9 +125,7 @@ test_accuracy  = (1 / (1 + np.mean(test_dist)))  * 100
 print(f"✅ Training Accuracy : {train_accuracy:.2f}%")
 print(f"✅ Testing Accuracy  : {test_accuracy:.2f}%")
 
-# ================================================
-# PART 9: Save Model
-# ================================================
+# Save Model
 with open('food_recommender.pkl', 'wb') as f:
     pickle.dump({
         'model'   : model,
