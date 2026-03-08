@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import pickle
@@ -12,24 +11,32 @@ DB_USER = 'root'
 DB_PASS = ''
 DB_HOST = '127.0.0.1'
 DB_NAME = 'food_ordering_db'
+
 engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}")
 
-# Load Model
+# Load trained model
 try:
     with open('food_recommender.pkl', 'rb') as f:
         saved_obj = pickle.load(f)
+
     model       = saved_obj['model']
     scaler      = saved_obj['scaler']
     le_cust     = saved_obj['le_cust']
     le_food     = saved_obj['le_food']
     original_df = saved_obj['data']
+
     print("✅ Model Loaded Successfully")
+
 except Exception as e:
     print("❌ Model Load Error:", e)
     exit()
 
-# Popular Items Fallback
+
+# -----------------------------
+# Popular items fallback
+# -----------------------------
 def get_popular_items(limit=5):
+
     query = """
         SELECT t.item_id, COUNT(*) as order_count
         FROM tbl_torder t
@@ -38,152 +45,423 @@ def get_popular_items(limit=5):
         ORDER BY order_count DESC
         LIMIT %s
     """
+
     df = pd.read_sql(query, engine, params=(limit,))
     return df['item_id'].astype(str).tolist()
 
-#  Content-Based (same sub_cat_id)
-def get_same_category_items(item_id, exclude_item_id, limit=5):
-    """Return items from the same sub_category as the given item."""
+
+# -----------------------------
+# Same category recommendation
+# -----------------------------
+def get_same_category_items(item_id, limit=5):
+
     query = """
         SELECT i2.item_id
         FROM tbl_items i1
         JOIN tbl_items i2 ON i1.sub_cat_id = i2.sub_cat_id
         WHERE i1.item_id = %s
-          AND i2.item_id != %s
-          AND i2.item_status = 1
+        AND i2.item_status = 1
+        AND i2.item_id != %s
         LIMIT %s
     """
-    df = pd.read_sql(query, engine, params=(item_id, exclude_item_id, limit))
+
+    df = pd.read_sql(query, engine, params=(item_id, item_id, limit))
+
     return df['item_id'].astype(str).tolist()
+
 
 @app.route('/')
 def home():
-    return "🍽 AI  Food Recommendation API Running"
+    return "🍔 AI Food Recommendation API Running"
 
+
+# -------------------------------------------------
+# Recommendation API
+# -------------------------------------------------
 @app.route('/api/recommend', methods=['POST'])
 def recommend():
+
     if not request.is_json:
         return jsonify({'status': 'error', 'message': 'JSON required'}), 400
 
-    data    = request.get_json()
+    data = request.get_json()
     cust_id = str(data.get('customer_id')).strip()
 
     if not cust_id:
         return jsonify({'status': 'error', 'message': 'customer_id required'}), 400
 
-    #  Unknown customer → Popular items
+
+    # --------------------------------
+    # Unknown customer → Popular items
+    # --------------------------------
     if cust_id not in [str(c) for c in le_cust.classes_]:
-        print(f"⚠️  Unknown customer — returning popular items")
-        popular = get_popular_items(limit=5)
-        if not popular:
-            return jsonify({'status': 'error', 'message': 'No data available'}), 404
+
+        popular = get_popular_items()
+
         return jsonify({
-            'status'         : 'success',
-            'customer_id'    : cust_id,
+            'status': 'success',
+            'customer_id': cust_id,
             'recommendations': popular,
-            'type'           : 'popular'
+            'type': 'popular'
         })
 
-    # Known customer → Hybrid Recommendation
-    # Collaborative (KNN) + Content-Based (sub_cat_id)
+
     try:
+
+        # --------------------------------
+        # Load customer order history
+        # --------------------------------
         query = """
             SELECT 
                 m.customer_id,
                 t.item_id,
                 t.total_price AS subtotal,
-                i.sub_cat_id
+                i.sub_cat_id,
+                m.created_at
             FROM tbl_morder m
             JOIN tbl_torder t ON t.order_id = m.id
-            JOIN tbl_items  i ON i.item_id  = t.item_id
+            JOIN tbl_items i ON i.item_id = t.item_id
             WHERE m.customer_id = %s
             ORDER BY m.created_at
         """
+
         df = pd.read_sql(query, engine, params=(cust_id,))
 
         if df.empty:
-            popular = get_popular_items(limit=5)
+
+            popular = get_popular_items()
+
             return jsonify({
-                'status'         : 'success',
-                'customer_id'    : cust_id,
+                'status': 'success',
+                'customer_id': cust_id,
                 'recommendations': popular,
-                'type'           : 'popular'
+                'type': 'popular'
             })
 
-        df['customer_id'] = df['customer_id'].astype(str)
-        df['item_id']     = df['item_id'].astype(str)
-        df['Rating']      = 3.5
-        df['sub_cat_id']  = pd.to_numeric(df['sub_cat_id'], errors='coerce').fillna(0).astype(int)
 
-        # Encode customer
+        df['customer_id'] = df['customer_id'].astype(str)
+        df['item_id'] = df['item_id'].astype(str)
+        df['Rating'] = 3.5
+        df['sub_cat_id'] = pd.to_numeric(df['sub_cat_id'], errors='coerce').fillna(0).astype(int)
+
+        # Encode
         df['cust_encoded'] = le_cust.transform(df['customer_id'])
 
-        # Filter unseen items
         known_items = set([str(c) for c in le_food.classes_])
         df = df[df['item_id'].isin(known_items)]
 
         if df.empty:
-            popular = get_popular_items(limit=5)
+            popular = get_popular_items()
+
             return jsonify({
-                'status'         : 'success',
-                'customer_id'    : cust_id,
+                'status': 'success',
+                'customer_id': cust_id,
                 'recommendations': popular,
-                'type'           : 'popular'
+                'type': 'popular'
             })
 
         df['food_encoded'] = le_food.transform(df['item_id'])
 
-        # Last order info
-        last_order      = df.iloc[-1:]
-        last_item_id    = last_order['item_id'].values[0]
-        last_sub_cat_id = last_order['sub_cat_id'].values[0]
 
-        features = last_order[['cust_encoded', 'food_encoded', 'sub_cat_id', 'Rating', 'subtotal']]
-        scaled   = scaler.transform(features)
+        # --------------------------------
+        # Use last 3 orders instead of last 1
+        # --------------------------------
+        last_orders = df.tail(3)
 
-        # Collaborative Filtering (KNN)
-        n_neighbors        = min(6, len(original_df))
-        distances, indices = model.kneighbors(scaled, n_neighbors=n_neighbors)
 
         collaborative_recs = []
-        for i in range(1, len(indices.flatten())):
-            food_code = original_df.iloc[indices.flatten()[i]]['food_encoded']
-            food_id   = str(le_food.inverse_transform([food_code])[0])
-            collaborative_recs.append(food_id)
+        content_recs = []
 
-        collaborative_recs = list(dict.fromkeys(collaborative_recs))  
+        for _, row in last_orders.iterrows():
 
-        # Content-Based Filtering (same sub_cat_id)        
-        content_recs = get_same_category_items(
-            item_id=last_item_id,
-            exclude_item_id=last_item_id,
-            limit=5
-        )
+            features = [[
+                row['cust_encoded'],
+                row['food_encoded'],
+                row['sub_cat_id'],
+                row['Rating'],
+                row['subtotal']
+            ]]
 
-        #  Merge both (Content first, then Collaborative)
-        hybrid_recs = content_recs.copy()
+            scaled = scaler.transform(features)
+
+            distances, indices = model.kneighbors(scaled, n_neighbors=6)
+
+            for i in range(1, len(indices.flatten())):
+
+                food_code = original_df.iloc[indices.flatten()[i]]['food_encoded']
+                food_id = str(le_food.inverse_transform([food_code])[0])
+
+                collaborative_recs.append(food_id)
+
+            # Content based
+            content_items = get_same_category_items(row['item_id'], limit=3)
+
+            content_recs.extend(content_items)
+
+
+        # Remove duplicates
+        collaborative_recs = list(dict.fromkeys(collaborative_recs))
+        content_recs = list(dict.fromkeys(content_recs))
+
+
+        # --------------------------------
+        # Hybrid merge
+        # --------------------------------
+        hybrid = content_recs.copy()
+
         for item in collaborative_recs:
-            if item not in hybrid_recs:
-                hybrid_recs.append(item)
 
-        hybrid_recs = hybrid_recs[:5]  
+            if item not in hybrid:
+                hybrid.append(item)
 
-        print(f"✅ Collaborative : {collaborative_recs}")
-        print(f"✅ Content-Based : {content_recs}")
-        print(f"✅ Hybrid Final  : {hybrid_recs}")
+
+        # Remove already ordered items
+        ordered_items = df['item_id'].tolist()
+
+        hybrid = [x for x in hybrid if x not in ordered_items]
+
+        hybrid = hybrid[:5]
+
+
+        # fallback
+        if len(hybrid) == 0:
+            hybrid = get_popular_items()
+
+
+        print("Customer:", cust_id)
+        print("Last Orders:", last_orders['item_id'].tolist())
+        print("Content:", content_recs)
+        print("Collaborative:", collaborative_recs)
+        print("Final:", hybrid)
+
 
         return jsonify({
-            'status'         : 'success',
-            'customer_id'    : cust_id,
-            'recommendations': hybrid_recs,
-            'type'           : 'ai'
+            'status': 'success',
+            'customer_id': cust_id,
+            'recommendations': hybrid,
+            'type': 'ai'
         })
 
+
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5000, debug=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# from flask import Flask, request, jsonify
+# from flask_cors import CORS
+# import pickle
+# import pandas as pd
+# from sqlalchemy import create_engine
+
+# app = Flask(__name__)
+# CORS(app)
+
+# DB_USER = 'root'
+# DB_PASS = ''
+# DB_HOST = '127.0.0.1'
+# DB_NAME = 'food_ordering_db'
+# engine = create_engine(f"mysql+pymysql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}")
+
+# # Load Model
+# try:
+#     with open('food_recommender.pkl', 'rb') as f:
+#         saved_obj = pickle.load(f)
+#     model       = saved_obj['model']
+#     scaler      = saved_obj['scaler']
+#     le_cust     = saved_obj['le_cust']
+#     le_food     = saved_obj['le_food']
+#     original_df = saved_obj['data']
+#     print("✅ Model Loaded Successfully")
+# except Exception as e:
+#     print("❌ Model Load Error:", e)
+#     exit()
+
+# # Popular Items Fallback
+# def get_popular_items(limit=5):
+#     query = """
+#         SELECT t.item_id, COUNT(*) as order_count
+#         FROM tbl_torder t
+#         JOIN tbl_morder m ON t.order_id = m.id
+#         GROUP BY t.item_id
+#         ORDER BY order_count DESC
+#         LIMIT %s
+#     """
+#     df = pd.read_sql(query, engine, params=(limit,))
+#     return df['item_id'].astype(str).tolist()
+
+# #  Content-Based (same sub_cat_id)
+# def get_same_category_items(item_id, exclude_item_id, limit=5):
+#     """Return items from the same sub_category as the given item."""
+#     query = """
+#         SELECT i2.item_id
+#         FROM tbl_items i1
+#         JOIN tbl_items i2 ON i1.sub_cat_id = i2.sub_cat_id
+#         WHERE i1.item_id = %s
+#           AND i2.item_id != %s
+#           AND i2.item_status = 1
+#         LIMIT %s
+#     """
+#     df = pd.read_sql(query, engine, params=(item_id, exclude_item_id, limit))
+#     return df['item_id'].astype(str).tolist()
+
+# @app.route('/')
+# def home():
+#     return "🍽 AI  Food Recommendation API Running"
+
+# @app.route('/api/recommend', methods=['POST'])
+# def recommend():
+#     if not request.is_json:
+#         return jsonify({'status': 'error', 'message': 'JSON required'}), 400
+
+#     data    = request.get_json()
+#     cust_id = str(data.get('customer_id')).strip()
+
+#     if not cust_id:
+#         return jsonify({'status': 'error', 'message': 'customer_id required'}), 400
+
+#     #  Unknown customer → Popular items
+#     if cust_id not in [str(c) for c in le_cust.classes_]:
+#         print(f"⚠️  Unknown customer — returning popular items")
+#         popular = get_popular_items(limit=5)
+#         if not popular:
+#             return jsonify({'status': 'error', 'message': 'No data available'}), 404
+#         return jsonify({
+#             'status'         : 'success',
+#             'customer_id'    : cust_id,
+#             'recommendations': popular,
+#             'type'           : 'popular'
+#         })
+
+#     # Known customer → Hybrid Recommendation
+#     # Collaborative (KNN) + Content-Based (sub_cat_id)
+#     try:
+#         query = """
+#             SELECT 
+#                 m.customer_id,
+#                 t.item_id,
+#                 t.total_price AS subtotal,
+#                 i.sub_cat_id
+#             FROM tbl_morder m
+#             JOIN tbl_torder t ON t.order_id = m.id
+#             JOIN tbl_items  i ON i.item_id  = t.item_id
+#             WHERE m.customer_id = %s
+#             ORDER BY m.created_at
+#         """
+#         df = pd.read_sql(query, engine, params=(cust_id,))
+
+#         if df.empty:
+#             popular = get_popular_items(limit=5)
+#             return jsonify({
+#                 'status'         : 'success',
+#                 'customer_id'    : cust_id,
+#                 'recommendations': popular,
+#                 'type'           : 'popular'
+#             })
+
+#         df['customer_id'] = df['customer_id'].astype(str)
+#         df['item_id']     = df['item_id'].astype(str)
+#         df['Rating']      = 3.5
+#         df['sub_cat_id']  = pd.to_numeric(df['sub_cat_id'], errors='coerce').fillna(0).astype(int)
+
+#         # Encode customer
+#         df['cust_encoded'] = le_cust.transform(df['customer_id'])
+
+#         # Filter unseen items
+#         known_items = set([str(c) for c in le_food.classes_])
+#         df = df[df['item_id'].isin(known_items)]
+
+#         if df.empty:
+#             popular = get_popular_items(limit=5)
+#             return jsonify({
+#                 'status'         : 'success',
+#                 'customer_id'    : cust_id,
+#                 'recommendations': popular,
+#                 'type'           : 'popular'
+#             })
+
+#         df['food_encoded'] = le_food.transform(df['item_id'])
+
+#         # Last order info
+#         last_order      = df.iloc[-1:]
+#         last_item_id    = last_order['item_id'].values[0]
+#         last_sub_cat_id = last_order['sub_cat_id'].values[0]
+
+#         features = last_order[['cust_encoded', 'food_encoded', 'sub_cat_id', 'Rating', 'subtotal']]
+#         scaled   = scaler.transform(features)
+
+#         # Collaborative Filtering (KNN)
+#         n_neighbors        = min(6, len(original_df))
+#         distances, indices = model.kneighbors(scaled, n_neighbors=n_neighbors)
+
+#         collaborative_recs = []
+#         for i in range(1, len(indices.flatten())):
+#             food_code = original_df.iloc[indices.flatten()[i]]['food_encoded']
+#             food_id   = str(le_food.inverse_transform([food_code])[0])
+#             collaborative_recs.append(food_id)
+
+#         collaborative_recs = list(dict.fromkeys(collaborative_recs))  
+
+#         # Content-Based Filtering (same sub_cat_id)        
+#         content_recs = get_same_category_items(
+#             item_id=last_item_id,
+#             exclude_item_id=last_item_id,
+#             limit=5
+#         )
+
+#         #  Merge both (Content first, then Collaborative)
+#         hybrid_recs = content_recs.copy()
+#         for item in collaborative_recs:
+#             if item not in hybrid_recs:
+#                 hybrid_recs.append(item)
+
+#         hybrid_recs = hybrid_recs[:5]  
+
+#         print(f"✅ Collaborative : {collaborative_recs}")
+#         print(f"✅ Content-Based : {content_recs}")
+#         print(f"✅ Hybrid Final  : {hybrid_recs}")
+
+#         return jsonify({
+#             'status'         : 'success',
+#             'customer_id'    : cust_id,
+#             'recommendations': hybrid_recs,
+#             'type'           : 'ai'
+#         })
+
+#     except Exception as e:
+#         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# if __name__ == '__main__':
+#     app.run(host='127.0.0.1', port=5000, debug=True)
 
 
 
