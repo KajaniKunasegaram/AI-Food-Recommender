@@ -72,7 +72,7 @@ def get_same_category_items(item_id, limit=5):
 
 @app.route('/')
 def home():
-    return "🍔 AI Food Recommendation API Running"
+    return "🍽 AI  Food Recommendation API Running"
 
 
 # -------------------------------------------------
